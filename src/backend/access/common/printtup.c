@@ -420,7 +420,10 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 	 */
 	pq_beginmessage_reuse(buf, 'D');
 
-	pq_sendint16(buf, natts);
+	if (myState->urbfmt)
+		pq_sendint16(buf, (int16)-natts);
+	else
+		pq_sendint16(buf, natts);
 
 	/*
 	 * send the attributes of this tuple
