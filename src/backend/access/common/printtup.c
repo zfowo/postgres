@@ -22,6 +22,8 @@
 #include "utils/lsyscache.h"
 #include "utils/memdebug.h"
 #include "utils/memutils.h"
+#include "access/unsaferow.h"
+#include "utils/sqlcomment.h"
 
 
 static void printtup_startup(DestReceiver *self, int operation,
@@ -66,6 +68,7 @@ typedef struct
 	TupleDesc	attrinfo;		/* The attr info we are set up for */
 	int			nattrs;
 	PrinttupAttrInfo *myinfo;	/* Cached info about each attr */
+	bool urbfmt;				/* return UnsafeRow*/
 	StringInfoData buf;			/* output buffer (*not* in tmpcontext) */
 	MemoryContext tmpcontext;	/* Memory context for per-row workspace */
 } DR_printtup;
@@ -94,6 +97,7 @@ printtup_create_DR(CommandDest dest)
 	self->attrinfo = NULL;
 	self->nattrs = 0;
 	self->myinfo = NULL;
+	self->urbfmt = false;
 	self->buf.data = NULL;
 	self->tmpcontext = NULL;
 
@@ -328,7 +332,9 @@ printtup_prepare_info(DR_printtup *myState, TupleDesc typeinfo, int numAttrs)
 {
 	int16	   *formats = myState->portal->formats;
 	int			i;
+	bool has_urb_fmt = false, has_nonurb_fmt = false;
 
+	has_urb_fmt = ParseSqlComment(myState->portal->sourceText).unsaferow_format;
 	/* get rid of any old data */
 	if (myState->myinfo)
 		pfree(myState->myinfo);
@@ -349,7 +355,9 @@ printtup_prepare_info(DR_printtup *myState, TupleDesc typeinfo, int numAttrs)
 		Form_pg_attribute attr = TupleDescAttr(typeinfo, i);
 
 		thisState->format = format;
-		if (format == 0)
+		has_urb_fmt = (has_urb_fmt ? true : (format == 100));
+		has_nonurb_fmt = (has_nonurb_fmt ? true : (format != 100));
+		if (format == 0 || format == 100) /* 100 for unsaferow format*/
 		{
 			getTypeOutputInfo(attr->atttypid,
 							  &thisState->typoutput,
@@ -368,6 +376,15 @@ printtup_prepare_info(DR_printtup *myState, TupleDesc typeinfo, int numAttrs)
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("unsupported format code: %d", format)));
 	}
+	if (has_urb_fmt)
+	{
+		if (has_nonurb_fmt)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("can not use unsafe row format with other formats")));
+		else
+			myState->urbfmt = true;
+	}
 }
 
 /* ----------------
@@ -383,6 +400,7 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 	StringInfo	buf = &myState->buf;
 	int			natts = typeinfo->natts;
 	int			i;
+	UnsafeRowBuilder urb;
 
 	/* Set or update my derived attribute info, if needed */
 	if (myState->attrinfo != typeinfo || myState->nattrs != natts)
@@ -394,6 +412,9 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 	/* Switch into per-row context so we can recover memory below */
 	oldcontext = MemoryContextSwitchTo(myState->tmpcontext);
 
+	MemSet(&urb, 0, sizeof(urb));
+	if (myState->urbfmt)
+		UnsafeRowBuilderInit(&urb, natts);
 	/*
 	 * Prepare a DataRow message (note buffer is in per-row context)
 	 */
@@ -411,7 +432,10 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 
 		if (slot->tts_isnull[i])
 		{
-			pq_sendint32(buf, -1);
+			if (myState->urbfmt)
+				UnsafeRowBuilderAppendNull(&urb);
+			else
+				pq_sendint32(buf, -1);
 			continue;
 		}
 
@@ -426,6 +450,11 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 			VALGRIND_CHECK_MEM_IS_DEFINED(DatumGetPointer(attr),
 										  VARSIZE_ANY(attr));
 
+		if (myState->urbfmt)
+		{
+			UnsafeRowBuilderAppend(&urb, attr, TupleDescAttr(typeinfo, i));
+			continue;
+		}
 		if (thisState->format == 0)
 		{
 			/* Text output */
@@ -444,6 +473,13 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 			pq_sendbytes(buf, VARDATA(outputbytes),
 						 VARSIZE(outputbytes) - VARHDRSZ);
 		}
+	}
+	if (myState->urbfmt)
+	{
+		pq_sendbytes(buf, urb.bmp, (int)UnsafeRowBmpSize2(&urb));
+		pq_sendbytes(buf, urb.fixed_data, (int)UnsafeRowFixedDataSize(&urb));
+		if (UnsafeRowVarDataSize(&urb) > 0)
+			pq_sendbytes(buf, urb.var_data, (int)UnsafeRowVarDataSize(&urb));
 	}
 
 	pq_endmessage_reuse(buf);

@@ -73,4 +73,7 @@ extern Numeric numeric_mod_opt_error(Numeric num1, Numeric num2,
 									 bool *have_error);
 extern int32 numeric_int4_opt_error(Numeric num, bool *error);
 
+extern void parse_numeric_typmod(int32 typmod, int32 * p, int32 * s);
+extern char * numeric_as_intstr(Numeric num);
+
 #endif							/* _PG_NUMERIC_H_ */

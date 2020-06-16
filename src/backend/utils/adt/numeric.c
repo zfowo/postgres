@@ -1089,6 +1089,50 @@ numerictypmodout(PG_FUNCTION_ARGS)
 	PG_RETURN_CSTRING(res);
 }
 
+void
+parse_numeric_typmod(int32 typmod, int32 * p, int32 * s)
+{
+	if (typmod < 0)
+	{
+		if (p)
+			*p = -1;
+		if (s)
+			*s = -1;
+		return;
+	}
+	if (p)
+		*p = ((typmod - VARHDRSZ) >> 16) & 0xffff;
+	if (s)
+		*s = (typmod - VARHDRSZ) & 0xffff;
+}
+
+char *
+numeric_as_intstr(Numeric num)
+{
+	NumericVar x;
+	char * str;
+	int idx = 0;
+
+	/*
+	 * Handle NaN
+	 */
+	if (NUMERIC_IS_NAN(num))
+		return pstrdup("NaN");
+
+	init_var_from_num(num, &x);
+	str = get_str_from_var(&x);
+	while (str[idx] && str[idx] != '.')
+		++idx;
+	if (!str[idx])
+		return str;
+	while (str[idx])
+	{
+		str[idx] = str[idx + 1];
+		++idx;
+	}
+
+	return str;
+}
 
 /* ----------------------------------------------------------------------
  *
@@ -3772,11 +3816,11 @@ numeric_combine(PG_FUNCTION_ARGS)
 		PG_RETURN_POINTER(state1);
 	}
 
-	state1->N += state2->N;
-	state1->NaNcount += state2->NaNcount;
-
 	if (state2->N > 0)
 	{
+		state1->N += state2->N;
+		state1->NaNcount += state2->NaNcount;
+
 		/*
 		 * These are currently only needed for moving aggregates, but let's do
 		 * the right thing anyway...
@@ -3859,11 +3903,11 @@ numeric_avg_combine(PG_FUNCTION_ARGS)
 		PG_RETURN_POINTER(state1);
 	}
 
-	state1->N += state2->N;
-	state1->NaNcount += state2->NaNcount;
-
 	if (state2->N > 0)
 	{
+		state1->N += state2->N;
+		state1->NaNcount += state2->NaNcount;
+
 		/*
 		 * These are currently only needed for moving aggregates, but let's do
 		 * the right thing anyway...
