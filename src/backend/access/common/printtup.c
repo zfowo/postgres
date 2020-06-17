@@ -334,7 +334,7 @@ printtup_prepare_info(DR_printtup *myState, TupleDesc typeinfo, int numAttrs)
 	int			i;
 	bool has_urb_fmt = false, has_nonurb_fmt = false;
 
-	has_urb_fmt = ParseSqlComment(myState->portal->sourceText).unsaferow_format;
+	//has_urb_fmt = ParseSqlComment(myState->portal->sourceText).unsaferow_format;
 	/* get rid of any old data */
 	if (myState->myinfo)
 		pfree(myState->myinfo);
@@ -384,6 +384,10 @@ printtup_prepare_info(DR_printtup *myState, TupleDesc typeinfo, int numAttrs)
 					errmsg("can not use unsafe row format with other formats")));
 		else
 			myState->urbfmt = true;
+	}
+	else
+	{
+		myState->urbfmt = ParseSqlComment(myState->portal->sourceText).unsaferow_format;
 	}
 }
 
