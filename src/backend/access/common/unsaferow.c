@@ -41,7 +41,10 @@ static void AppendVarData(UnsafeRowBuilder * urb, const char * data, size_t sz)
 	if (urb->vardata_max_len - urb->vardata_cur_len < sz2)
 	{
 		size_t new_vardata_max_len = urb->vardata_cur_len + sz2;
-		urb->var_data = repalloc(urb->var_data, new_vardata_max_len);
+		if (urb->var_data)
+			urb->var_data = repalloc(urb->var_data, new_vardata_max_len);
+		else
+			urb->var_data = palloc0(new_vardata_max_len);
 		urb->vardata_max_len = new_vardata_max_len;
 	}
 	memcpy(urb->var_data + urb->vardata_cur_len, data, sz);
@@ -81,13 +84,25 @@ void UnsafeRowBuilderAppend(UnsafeRowBuilder * urb, Datum attr, Form_pg_attribut
 		AppendVarData(urb, data, sz);
 		*(uint64 *)addr = offset << 32 | sz;
 	}
-	else if (typid == TEXTOID)
+	else if (typid == TEXTOID || typid == VARCHAROID || typid == BPCHAROID)
 	{
+		struct varlena * v;
+		const char * data;
+		char * data2;
+		size_t sz;
 		size_t offset = UnsafeRowSize(urb);
-		text * v = DatumGetTextPP(attr);
-		const char * data = VARDATA_ANY(v);
-		size_t sz = VARSIZE_ANY_EXHDR(v);
-		char * data2 = pg_server_to_client(data, (int)sz);
+
+		v = PG_DETOAST_DATUM_PACKED(attr);
+		/*if (typid == TEXTOID)
+			v = (varlena *)DatumGetTextPP(attr);
+		else if (typid == VARCHAROID)
+			v = (varlena *)DatumGetVarCharPP(attr);
+		else
+			v = (varlena *)DatumGetBpCharPP(attr);*/
+
+		data = VARDATA_ANY(v);
+		sz = VARSIZE_ANY_EXHDR(v);
+		data2 = pg_server_to_client(data, (int)sz);
 		if (data2 != data)
 		{
 			sz = strlen(data2);
