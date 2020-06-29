@@ -77,6 +77,7 @@
 #include "utils/snapmgr.h"
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
+#include "utils/sqlcomment.h"
 #include "mb/pg_wchar.h"
 
 
@@ -615,6 +616,69 @@ ProcessClientWriteInterrupt(bool blocked)
 	errno = save_errno;
 }
 
+static List *
+process_raw_parsetree_from_sqlcomment(List * raw_parsetree_list, const char * query_string)
+{
+	char * relname;
+	RawStmt * rawstmt;
+	ListCell * lc;
+	SqlComment sc = ParseSqlComment(query_string);
+
+	if (!sc.nodeids)
+		return raw_parsetree_list;
+	if (list_length(raw_parsetree_list) > 1)
+		ereport(ERROR, 
+		        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), 
+				 errmsg("do not support multiple statement whiel sql comment has node parameter")));
+
+	rawstmt = linitial_node(RawStmt, raw_parsetree_list);
+	switch (nodeTag(rawstmt->stmt))
+	{
+	case T_InsertStmt: 
+		relname = ((InsertStmt *)rawstmt->stmt)->relation->relname;
+		break;
+	case T_UpdateStmt:
+		relname = ((UpdateStmt *)rawstmt->stmt)->relation->relname;
+		break;
+	case T_DeleteStmt:
+		relname = ((DeleteStmt *)rawstmt->stmt)->relation->relname;
+		break;
+	default:
+		ereport(ERROR, 
+			    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), 
+				 errmsg("only support INSERT/UPDATE/DELETE statement for node parameter in sql comment")));
+	}
+
+	foreach(lc, sc.nodeids)
+	{
+		RawStmt * rawstmt2 = (RawStmt *)copyObject(rawstmt);
+		Node * stmt2 = rawstmt2->stmt;
+		NodeTag nodetag = nodeTag(stmt2);
+		char * nodeid = (char *)lfirst(lc);
+		size_t sz1 = strlen(relname);
+		size_t sz2 = strlen(nodeid);
+		char * relname2 = palloc0(sz1 + sz2 + 2);
+
+		strcpy(relname2, relname);
+		relname2[sz1] = '_';
+		strcpy(relname2 + sz1 + 1, nodeid);
+
+		if (nodetag == T_InsertStmt)
+			((InsertStmt *)stmt2)->relation->relname = relname2;
+		else if (nodetag == T_UpdateStmt)
+			((UpdateStmt *)stmt2)->relation->relname = relname2;
+		else if (nodetag == T_DeleteStmt)
+			((DeleteStmt *)stmt2)->relation->relname = relname2;
+		else
+			ereport(ERROR, 
+					(errcode(ERRCODE_INTERNAL_ERROR), 
+					 errmsg("BUG in process_raw_parsetree_from_sqlcomment")));
+
+		raw_parsetree_list = lappend(raw_parsetree_list, rawstmt2);
+	}
+
+	return raw_parsetree_list;
+}
 /*
  * Do raw parsing (only).
  *
@@ -664,7 +728,7 @@ pg_parse_query(const char *query_string)
 
 	TRACE_POSTGRESQL_QUERY_PARSE_DONE(query_string);
 
-	return raw_parsetree_list;
+	return process_raw_parsetree_from_sqlcomment(raw_parsetree_list, query_string);
 }
 
 /*
