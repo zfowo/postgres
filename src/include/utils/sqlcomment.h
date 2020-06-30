@@ -36,10 +36,10 @@ static inline void ParseOneItemInSqlComment(const char * sql, int sidx, int eidx
 		else
 			lappend(sc->nodeids, nodeid);
 	}
-	else
+	/*else
 		ereport(ERROR,
 		        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-			     errmsg("unknown parameter in sql comment")));
+			     errmsg("unknown parameter in sql comment. sql:\"%s\"; sidx:%d; eidx:%d", sql, sidx, eidx)));*/
 }
 static inline SqlComment ParseSqlComment(const char * sql)
 {
