@@ -42,7 +42,9 @@
 #include "catalog/pg_type.h"
 #include "commands/async.h"
 #include "commands/prepare.h"
+#include "commands/defrem.h"
 #include "executor/spi.h"
+#include "foreign/foreign.h"
 #include "jit/jit.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
@@ -79,6 +81,7 @@
 #include "utils/timestamp.h"
 #include "utils/sqlcomment.h"
 #include "mb/pg_wchar.h"
+#include "port.h"
 
 
 /* ----------------
@@ -616,6 +619,78 @@ ProcessClientWriteInterrupt(bool blocked)
 	errno = save_errno;
 }
 
+static void
+process_copy_from_remote(RawStmt * rawstmt)
+{
+	CopyStmt * copystmt;
+	char * oldprogram, * newprogram;
+	int idx = 0;
+	size_t bufsz;
+	int nextidx;
+	ForeignServer * server = NULL;
+	ForeignDataWrapper * fdw = NULL;
+	UserMapping * um = NULL;
+	ListCell * lc;
+	bool hasuseropt = false;
+
+	if (nodeTag(rawstmt->stmt) != T_CopyStmt)
+		return;
+
+	copystmt = (CopyStmt *)rawstmt->stmt;
+	if (!copystmt->is_from || !copystmt->is_program)
+		return;
+	oldprogram = copystmt->filename;
+	if (oldprogram[0] != '@')
+		return;
+	while (oldprogram[idx] && oldprogram[idx] != ' ' && oldprogram[idx] != '\t')
+		++idx;
+	if (oldprogram[idx] == '\0')
+		ereport(ERROR, 
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("no sql statment in PROGRAM option")));
+	oldprogram[idx++] = '\0';
+
+	server = GetForeignServerByName(&oldprogram[1], false);
+	fdw = GetForeignDataWrapper(server->fdwid);
+	if (strcmp(fdw->fdwname, "postgres_fdw") != 0)
+		ereport(ERROR, 
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE), 
+				 errmsg("FDW for foreign server(%s) should be postgres_fdw", &oldprogram[1])));
+	um = GetUserMapping(GetUserId(), server->serverid);
+
+	bufsz = MAXPGPATH + strlen(&oldprogram[idx]);
+	newprogram = palloc0(bufsz);
+	nextidx = snprintf(newprogram, bufsz, "%s", my_exec_path);
+	get_parent_directory(newprogram);
+	nextidx = strlen(newprogram);
+	nextidx += snprintf(newprogram + nextidx, bufsz - nextidx, "/psql -t -w ");
+	foreach(lc, server->options)
+	{
+		DefElem * d = (DefElem *)lfirst(lc);
+		if (strcmp(d->defname, "host") == 0)
+			nextidx += snprintf(newprogram + nextidx, bufsz - nextidx, "-h %s ", defGetString(d));
+		else if (strcmp(d->defname, "port") == 0)
+			nextidx += snprintf(newprogram + nextidx, bufsz - nextidx, "-p %s ", defGetString(d));
+		else if (strcmp(d->defname, "dbname") == 0)
+			nextidx += snprintf(newprogram + nextidx, bufsz - nextidx, "-d %s ", defGetString(d));
+	}
+	foreach(lc, um->options)
+	{
+		DefElem * d = (DefElem *)lfirst(lc);
+		if (strcmp(d->defname, "user") == 0)
+		{
+			nextidx += snprintf(newprogram + nextidx, bufsz - nextidx, "-U %s ", defGetString(d));
+			hasuseropt = true;
+		}
+		else if (strcmp(d->defname, "password") == 0) // can not specify password in psql cmd option
+			;
+	}
+	if (!hasuseropt)
+		nextidx += snprintf(newprogram + nextidx, bufsz - nextidx, "-U %s ", MappingUserName(GetUserId()));
+	snprintf(newprogram + nextidx, bufsz - nextidx, "-c \"%s\"", &oldprogram[idx]);
+	copystmt->filename = newprogram;
+}
+
 static List *
 process_raw_parsetree_from_sqlcomment(List * raw_parsetree_list, const char * query_string)
 {
@@ -1140,6 +1215,7 @@ exec_simple_query(const char *query_string)
 		DestReceiver *receiver;
 		int16		format;
 
+		process_copy_from_remote(parsetree);
 		/*
 		 * Get the command name for use in status display (it also becomes the
 		 * default completion tag, down inside PortalRun).  Set ps_status and
